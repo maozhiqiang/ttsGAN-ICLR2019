@@ -5,7 +5,7 @@ from text.symbols import symbols
 from util.infolog import log
 from util.ops import shape_list
 from .helpers import TestHelper, TrainingHelper
-from .networks import encoder_cbhg, post_cbhg, prenet, reference_encoder, discriminator
+from .networks import encoder_cbhg, post_cbhg, prenet, reference_encoder, discriminator, style_encoder, c_net
 from .rnn_wrappers import DecoderPrenetWrapper, ConcatOutputAndAttentionWrapper, ZoneoutWrapper
 from .multihead_attention import MultiheadAttention
 
@@ -15,9 +15,11 @@ class ttsGAN():
     self._hparams = hparams
 
 
-  def initialize(self, inputs, input_lengths, mel_targets_pos=None, linear_targets_pos=None, mel_targets_neg=None, linear_targets_neg=None, labels_pos=None, labels_neg=None, reference_mel_pos=None, reference_mel_neg=None):
+  def initialize(self, inputs, input_lengths, mel_targets_pos=None, linear_targets_pos=None, mel_targets_neg=None,
+                 linear_targets_neg=None, labels_pos=None, labels_neg=None, reference_mel_pos=None, reference_mel_neg=None):
     
     is_training = linear_targets_pos is not None
+    self.is_training = is_training
     is_teacher_force_generating = mel_targets_pos is not None
     batch_size = tf.shape(inputs)[0]
     hp = self._hparams
@@ -160,11 +162,11 @@ class ttsGAN():
 
       
       if is_training or is_teacher_force_generating:
-        helper_pos = TacoTrainingHelper(inputs, mel_targets_pos, hp.num_mels, hp.outputs_per_step)
-        helper_neg = TacoTrainingHelper(inputs, mel_targets_neg, hp.num_mels, hp.outputs_per_step)
+        helper_pos = TrainingHelper(inputs, mel_targets_pos, hp.num_mels, hp.outputs_per_step)
+        helper_neg = TrainingHelper(inputs, mel_targets_neg, hp.num_mels, hp.outputs_per_step)
         
       else:
-        helper = TacoTestHelper(batch_size, hp.num_mels, hp.outputs_per_step)
+        helper = TestHelper(batch_size, hp.num_mels, hp.outputs_per_step)
 
       (decoder_outputs_pos, _), final_decoder_state_pos, _ = tf.contrib.seq2seq.dynamic_decode(
         BasicDecoder(output_cell_pos, helper_pos, decoder_init_state_pos),
@@ -226,6 +228,10 @@ class ttsGAN():
     self.linear_targets_neg = linear_targets_neg
     self.reference_mel_pos = reference_mel_pos
     self.reference_mel_neg = reference_mel_neg
+
+    self.labels_pos = labels_pos
+    self.labels_neg = labels_neg
+
     log('Initialized Tacotron model. Dimensions: ')
     log('text embedding:          %d' % embedded_inputs.shape[-1])
     #log(' negative text embedding:           %d' % embedded_inputs_neg.shape[-1])
@@ -243,26 +249,28 @@ class ttsGAN():
 
   def add_loss(self):
     '''Adds loss to the model. Sets "loss" field. initialize must have been called.'''
+    is_training = self.is_training
     with tf.variable_scope('loss') as scope:
       hp = self._hparams
-      batch_size = 16.
-            
+      batch_size=hp.batch_size
+
       ## Adversarial Game
       ## GAN loss
-      real_d_loss = tf.nn.softmax_cross_entropy_with_logits(logits=real_logit, labels=tf.constant([[1.0, 0.0, 0.0]] * batch_size))
+      real_d_loss = tf.nn.softmax_cross_entropy_with_logits(logits=self.real_logit, labels=tf.constant([[1.0, 0.0, 0.0]] * batch_size))
       real_d_loss = tf.reduce_mean(real_d_loss)
-      fake_d_loss_pos = tf.nn.softmax_cross_entropy_with_logits(logits=fake_logit_pos, labels=tf.constant([[0.0, 1.0, 0.0]]))
+      fake_d_loss_pos = tf.nn.softmax_cross_entropy_with_logits(logits=self.fake_logit_pos, labels=tf.constant([[0.0, 1.0, 0.0]]))
       fake_d_loss_pos = tf.reduce_mean(fake_d_loss_pos)
-      fake_d_loss_neg = tf.nn.softmax_cross_entropy_with_logits(logits=fake_logit_neg, labels=tf.constant([[0.0, 0.0, 1.0]]))
+      fake_d_loss_neg = tf.nn.softmax_cross_entropy_with_logits(logits=self.fake_logit_neg, labels=tf.constant([[0.0, 0.0, 1.0]]))
       fake_d_loss_neg = tf.reduce_mean(fake_d_loss_neg)
 
-      fake_g_loss_pos = tf.nn.softmax_cross_entropy_with_logits(logits=fake_logit_pos, labels=tf.constant([[1.0, 0.0, 0.0]]))
+      fake_g_loss_pos = tf.nn.softmax_cross_entropy_with_logits(logits=self.fake_logit_pos, labels=tf.constant([[1.0, 0.0, 0.0]]))
       fake_g_loss_pos = tf.reduce_mean(fake_g_loss_pos)
-      fake_g_loss_neg = tf.nn.softmax_cross_entropy_with_logits(logits=fake_logit_neg, labels=tf.constant([[1.0, 0.0, 0.0]]))
+      fake_g_loss_neg = tf.nn.softmax_cross_entropy_with_logits(logits=self.fake_logit_neg, labels=tf.constant([[1.0, 0.0, 0.0]]))
       fake_g_loss_neg = tf.reduce_mean(fake_g_loss_neg)
 
       self.d_loss = real_d_loss + (fake_d_loss_pos + fake_d_loss_neg)/2.
-      self.g_loss = (gen_loss_pos + gen_loss_neg)/2.
+      self.g_loss = (fake_g_loss_pos + fake_g_loss_neg)/2.
+      adv_loss = self.d_loss + self.g_loss
 
       ## Collaboratvie Game
       ## Reconstruction loss in original space
@@ -274,34 +282,32 @@ class ttsGAN():
       pos_target_logit = c_net(self.refnet_outputs_pos, is_training)
 
       refnet_rec_neg = reference_encoder(
-          self.mel_output_neg, 
+          self.mel_outputs_neg,
           filters=[32, 32, 64, 64, 128, 128], 
           kernel_size=(3,3),
           strides=(2,2),
           encoder_cell=GRUCell(128),
-          is_training=is_training)                                                 # [n, 128]
+          is_training=is_training) # [n, 128]
 
       refnet_rec_pos = reference_encoder(
-          self.mel_output_pos, 
+          self.mel_outputs_pos,
           filters=[32, 32, 64, 64, 128, 128], 
           kernel_size=(3,3),
           strides=(2,2),
           encoder_cell=GRUCell(128),
-          is_training=is_training)                                                 # [n, 128]
+          is_training=is_training) # [n, 128]
 
       neg_rec_logit = c_net(refnet_rec_neg, is_training)
       pos_rec_logit = c_net(refnet_rec_pos, is_training)
 
-      
-        
       self.neg_target_c_loss = tf.nn.softmax_cross_entropy_with_logits(labels=self.labels_neg, logits=neg_target_logit)
       self.neg_target_c_loss = tf.reduce_mean(self.neg_target_c_loss)
-      self.neg_rec_c_loss = tf.nn.softmax_cross_ebtropy_with_logits(labels=self.labels_neg, logits=neg_rec_logit)
+      self.neg_rec_c_loss = tf.nn.softmax_cross_entropy_with_logits(labels=self.labels_neg, logits=neg_rec_logit)
       self.neg_rec_c_loss = tf.reduce_mean(self.neg_rec_c_loss)
 
       self.pos_target_c_loss = tf.nn.softmax_cross_entropy_with_logits(labels=self.labels_pos, logits=pos_target_logit)
       self.pos_target_c_loss = tf.reduce_mean(self.pos_target_c_loss)
-      self.pos_rec_c_loss = tf.nn.softmax_cross_ebtropy_with_logits(labels=self.labels_pos, logits=pos_rec_logit)
+      self.pos_rec_c_loss = tf.nn.softmax_cross_entropy_with_logits(labels=self.labels_pos, logits=pos_rec_logit)
       self.pos_rec_c_loss = tf.reduce_mean(self.pos_rec_c_loss)
 
       self.rec_loss = self.mel_loss_pos + self.linear_loss_pos + self.neg_target_c_loss + self.neg_rec_c_loss + self.pos_target_c_loss + self.pos_rec_c_loss
@@ -317,7 +323,7 @@ class ttsGAN():
         feature = self.ref_style[layer]
         feature = tf.reshape(feature, [-1, feature.shape[3]])
         dim = feature.shape[1].value
-        size = batch_size * dim
+        size = tf.to_float(batch_size * dim)
         gram = tf.matmul(tf.transpose(feature), feature) / size
         style_features[layer] = gram
 
@@ -326,7 +332,7 @@ class ttsGAN():
         feature = self.rec_style[layer]
         feature = tf.reshape(feature, [-1, feature.shape[3]])
         dim = feature.shape[1].value
-        size = batch_size * dim
+        size = tf.to_float(batch_size * dim)
         gram = tf.matmul(tf.transpose(feature), feature) / size
         style_features_rec[layer] = gram
 
@@ -334,7 +340,7 @@ class ttsGAN():
       for layer in STYLE_LAYERS:
         rec_feature = style_features_rec[layer]
         dim = rec_feature.shape[1].value
-        size = batch_size * dim
+        size = tf.to_float(batch_size * dim)
         style_loss += tf.nn.l2_loss(style_features[layer] - rec_feature) / size
 
       self.style_loss = tf.reduce_mean(style_loss)

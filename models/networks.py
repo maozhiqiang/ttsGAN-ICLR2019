@@ -36,7 +36,7 @@ def reference_encoder(inputs, filters, kernel_size, strides, encoder_cell, is_tr
     return reference_state
 
 def c_net(inputs, is_training):
-  with tf.variable_scrope('c_net', reuse=tf.AUDO_REUSE):
+  with tf.variable_scope('c_net', reuse=tf.AUTO_REUSE):
     logit = tf.layers.dense(inputs, 4)
     return logit
 
@@ -149,14 +149,14 @@ def discriminator(inputs_content, inputs_mel, is_training, scope='discriminator'
   kernel_size = (3, 3)
   strides = (2,2)
   encoder_cell=GRUCell(128)
-  
-  inputs_content = tf.reduce_mean(inputs_content, 1)
+
+  inputs_content = tf.reduce_mean(inputs_content, 1, keepdims=True)
   inputs_content = tf.tile(inputs_content, [1, shape_list(inputs_mel)[1], 1])
-  
+
   inputs = tf.concat([inputs_mel, inputs_content], axis=-1)
   
   with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
-    ref_outputs = tf.expand_dims(inputs,axis=-1)
+    ref_outputs = tf.expand_dims(inputs, axis=-1)
 
     # CNN stack
     for i, channel in enumerate(filters):

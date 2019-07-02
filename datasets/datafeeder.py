@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import os
 import re
@@ -8,12 +9,11 @@ import time
 import traceback
 from text import cmudict, text_to_sequence
 from util.infolog import log
-
+from hparams import hparams
 
 _batches_per_group = 32
 _p_cmudict = 0.5
 _pad = 0
-
 
 class DataFeeder(threading.Thread):
   '''Feeds batches of data into a queue on a background thread.'''
@@ -58,9 +58,11 @@ class DataFeeder(threading.Thread):
     ]
      
     # Create queue for buffering data:
-    queue = tf.FIFOQueue(16, [tf.int32, tf.int32, tf.float32, tf.float32, tf.int32, tf.int32, tf.float32, tf.float32, tf.int32, tf.int32], name='input_queue')
+    queue = tf.FIFOQueue(16, [tf.int32, tf.int32, tf.float32, tf.float32, tf.int32, tf.int32, tf.float32,
+                              tf.float32, tf.int32, tf.int32], name='input_queue')
     self._enqueue_op = queue.enqueue(self._placeholders)
-    self.inputs_pos, self.input_lengths_pos, self.mel_targets_pos, self.linear_targets_pos,self.inputs_neg, self.input_lengths_neg, self.mel_targets_neg, self.linear_targets_neg = queue.dequeue()
+    self.inputs_pos, self.input_lengths_pos, self.mel_targets_pos, self.linear_targets_pos,self.inputs_neg, \
+        self.input_lengths_neg, self.mel_targets_neg, self.linear_targets_neg, self.labels_pos, self.labels_neg = queue.dequeue()
     
     self.inputs_pos.set_shape(self._placeholders[0].shape)
     self.input_lengths_pos.set_shape(self._placeholders[1].shape)
@@ -73,7 +75,7 @@ class DataFeeder(threading.Thread):
     self.linear_targets_neg.set_shape(self._placeholders[3].shape)
 
     self.labels_pos.set_shape(self._placeholders[8].shape)
-    self.labels_pos.set_shape(self._placeholders[8].shape)
+    self.labels_neg.set_shape(self._placeholders[9].shape)
 
 
     # Load CMUDict: If enabled, this will randomly substitute some words in the training data with
@@ -112,8 +114,8 @@ class DataFeeder(threading.Thread):
     r = self._hparams.outputs_per_step
     examples = [self._get_next_example() for i in range(n * _batches_per_group)]
 
-    # Bucket examples based on similar output sequence length for efficiency:
-    examples.sort(key=lambda x: x[-1])
+    # Bucket examples based on similar output sequ ence length for efficiency:
+    examples.sort(key=lambda x: x[-3])
     batches = [examples[i:i+n] for i in range(0, len(examples), n)]
     random.shuffle(batches)
 
@@ -133,9 +135,11 @@ class DataFeeder(threading.Thread):
     meta_neg = self._metadata_neg[self._offset]
     self._offset += 1
 
+    #adds a space between punctuation and the word
     _punctuation_re = re.compile(r'([\.,"\-_:]+)')
-    text_pos =  re.sub(_punctuation_re, r' \1 ', meta_pos[3])
-    text_neg =  re.sub(_punctuation_re, r' \1 ', meta_neg[3])
+    text_pos = re.sub(_punctuation_re, r' \1 ', meta_pos[3])
+    text_neg = re.sub(_punctuation_re, r' \1 ', meta_neg[3])
+
     if self._cmudict and random.random() < _p_cmudict:
       text_pos = ' '.join([self._maybe_get_arpabet(word) for word in text_pos.split(' ')])
       text_neg = ' '.join([self._maybe_get_arpabet(word) for word in text_neg.split(' ')])
@@ -155,7 +159,8 @@ class DataFeeder(threading.Thread):
     label_pos[idx_pos] = 1.
     label_neg[idx_neg] = 1.
 
-    return (input_data_pos, mel_target_pos, linear_target_pos, len(linear_target_pos), input_data_neg, mel_target_neg, linear_target_neg, len(linear_target_neg), label_pos, label_neg)
+    return (input_data_pos, mel_target_pos, linear_target_pos, len(linear_target_pos), input_data_neg, mel_target_neg,
+            linear_target_neg, len(linear_target_neg), label_pos, label_neg)
 
 
   def _maybe_get_arpabet(self, word):
@@ -202,3 +207,23 @@ def _pad_target(t, length):
 def _round_up(x, multiple):
   remainder = x % multiple
   return x if remainder == 0 else x + multiple - remainder
+
+def test():
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--base_dir', default=os.path.dirname(os.getcwd()))
+  parser.add_argument('--input_pos', default='training/train-pos.txt')
+  parser.add_argument('--input_neg', default='training/train-neg.txt')
+  parser.add_argument('--hparams', default='',
+    help='Hyperparameter overrides as a comma-separated list of name=value pairs')
+
+  args = parser.parse_args()
+  hparams.parse(args.hparams)
+
+  input_path_pos = os.path.join(args.base_dir, args.input_pos)
+  input_path_neg = os.path.join(args.base_dir, args.input_neg)
+
+  coord = tf.train.Coordinator()
+  feeder = DataFeeder(coord, input_path_pos, input_path_neg, hparams)
+
+if __name__ == '__main__':
+  test()

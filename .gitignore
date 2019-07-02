@@ -8,4 +8,6 @@ training*/
 logs*
 database
 *.zip
+venv
+.idea
 

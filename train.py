@@ -15,15 +15,11 @@ from text import sequence_to_text
 from util import audio, infolog, plot, ValueWindow
 log = infolog.log
 
-
 def get_git_commit():
   subprocess.check_output(['git', 'diff-index', '--quiet', 'HEAD'])   # Verify client is clean
   commit = subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()[:10]
   log('Git commit: %s' % commit)
   return commit
-
-
-
 
 def time_string():
   return datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -51,7 +47,8 @@ def train(log_dir, args):
   global_step = tf.Variable(0, name='global_step', trainable=False)
   with tf.variable_scope('model') as scope:
     model = create_model(args.model, hparams)
-    model.initialize(feeder.inputs_pos, feeder.input_lengths_pos, feeder.mel_targets_pos, feeder.linear_targets_pos, feeder.mel_targets_neg, feeder.linear_targets_neg, feeder.labels_pos, feeder.labels_neg)
+    model.initialize(feeder.inputs_pos, feeder.input_lengths_pos, feeder.mel_targets_pos, feeder.linear_targets_pos,
+                     feeder.mel_targets_neg, feeder.linear_targets_neg, feeder.labels_pos, feeder.labels_neg)
     model.add_loss()
     model.add_optimizer(global_step)
     
@@ -130,6 +127,9 @@ def main():
   parser.add_argument('--checkpoint_interval', type=int, default=1000,
     help='Steps between writing checkpoints.')
   parser.add_argument('--tf_log_level', type=int, default=1, help='Tensorflow C++ log level.')
+  parser.add_argument('--slack_url', default=None)
+  parser.add_argument('--git', default=False)
+
   args = parser.parse_args()
   os.environ['TF_CPP_MIN_LOG_LEVEL'] = str(args.tf_log_level)
   run_name = args.name or args.model

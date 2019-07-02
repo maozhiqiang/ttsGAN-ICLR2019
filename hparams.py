@@ -1,5 +1,8 @@
 import tensorflow as tf
+import warnings
 
+warnings.filterwarnings("ignore", category=FutureWarning)
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
 # Default hyperparameters:
 hparams = tf.contrib.training.HParams(
