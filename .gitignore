@@ -10,4 +10,6 @@ database
 *.zip
 venv
 .idea
-
+.gitconfig
+.viminfo
+pretrained-model/*.wav
